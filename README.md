@@ -24,7 +24,7 @@ L'utilité d'un /30 est de maitriser le nombre d'adresses disponibles dans un r�
 	 - Déjà effectué dans le patron
  - Définition d'IP statique sur les deux cartes host-only
 	- `ip a` : on vérifie que nos cartes enp0s3 (NAT), enp0s8 et enp0s9 (host-only) sont bien présentes.
-	- `sudo nano /etc/sysconfig/network-scripts/ifcfg-enp0s8` 
+	- `sudo nano /etc/sysconfig/network-scripts/ifcfg-enp0s8`
 	- `cat /etc/sysconfig/network-scripts/ifcfg-enp0s8` nous retourne : `TYPE=Ethernet BOOTPROTO=static IPADDR=10.1.1.2 NETMASK=255.255.255.0 NAME=enp0s8 DEVICE=enp0S8 ONBOOT=yes`
 	- Même chose avec enp0s9 à la place de enp0s8 avec `IPADDR=10.1.2.2` et `NETMASK=255.255.255.252`
 	- `sudo ifdown <nom>`, puis `sudo ifup <nom>` pour les deux cartes modifiés (enp0s8 et enp0s9)
@@ -137,6 +137,43 @@ On ouvre le fichier avec WireShark et on obtient 2 lignes oranges pour les paque
 
 #### UDP
 
+On ouvre le port UDP 8888 sur client1, puis on écoute ce dernier : 
+
+	sudo firewall-cmd --add-port=8888/udp --permanent
+	sudo firewall-cmd --reload
+	nc -u -l 8888
+Puis on se connecte sur le port UDP 8888 du client1 depuis le client2 : 
+	
+	nc -u client1 8888
+
+Pour voir la connexion établie on utilise `ss -unp`.
+
+client1 : 
+
+	Recv-Q Send-Q                    Local Address:Port                                   Peer Address:Port
+	0      0                              10.1.1.2:8888                                       10.1.1.3:45629               users:(("nc",pid=1623,fd=4))
+	
+client2 : 
+
+	Recv-Q Send-Q                    Local Address:Port                                   Peer Address:Port
+	0      0                              10.1.1.3:45629                                       10.1.1.2:8888                users:(("nc",pid=1486,fd=3))
+
+On remarque la connexion entre les deux VMs sur le
+
+On analyse la connexion avec tcpdump (pour capturer les messages/divers paquets) : 
+
+    sudo tcpdump -i enp0s8 -w nc-udp.pcap
+
+On s'échange quelques messages puis on ferme la connexion `netcat` et  `tcpdump`.
+
+On récupère l'échange sur l'hôte avant de l'analyser sur WireShark : 
+
+    scp florian@10.1.1.2:/home/florian/nc-udp.pcap .\Desktop\
+
+Sur WireShark on trouve la présence de :
+- paquets ARP
+- Et les messages dans des paquets UDP, on constate qu'il n'y a pas de tunnel ni de “3-way handshake".
+
 #### TCP
 
 On ouvre le port TCP 8888 sur client1, puis on écoute ce dernier : 
@@ -167,26 +204,47 @@ On remarque que les connexions établies sur les deux VMs sont :
 - 2 connexions SSH
 - La connexion entre les deux VMs sur la machine `10.1.1.2:8888`
 
-On analyse la connexion avec tcpdump
- sudo tcpdump -i enp0s8 -w nc-tcp.pcap
+On analyse la connexion avec tcpdump (pour capturer les messages/divers paquets) : 
 
-on établit la co
-on parle (3msgs)
-on ferme la co
+    sudo tcpdump -i enp0s8 -w nc-tcp.pcap
 
-on ferme tcpdump
+On établit la connexion avec `netcat`, on s'échange quelques messages puis on ferme la connexion `netcat` avant d'arrêter `tcpdump`.
 
-scp florian@10.1.1.2:/home/florian/nc-tcp.pcap .\Desktop\
+On récupère l'échange sur l'hôte avant de l'analyser sur WireShark : 
 
-on ouvre wireshark
-2 ARP
-2 SYNC
-chaque msg -> PUSH, ACK puis ACK
-2FIN -> ACK
+    scp florian@10.1.1.2:/home/florian/nc-tcp.pcap .\Desktop\
 
-## Membre
-LAFUENTE Florian
-MEHAYE Clément
-SOMBRUN Joé
+Sur WireShark on trouve la présence de :
+- 2 paquets ARP
+- 2 paquets SYNC pour la synchronisation des deux machines
+- A chaque message on retrouve : le message, un "PUSH" et un "ACK" (acknowledgement) de la part de l'expéditeur et un "ACK" du destinataire. Il s'agit du "3-way handshake TCP".
+- 2 paquets de FIN de communication avec les paquets "ACK" associés
 
+## 3/ Routage statique simple
 
+On commence par transformer le client1 en routeur, puis on sur client2 on ajoute une route statique vers net2.
+
+client1 : 
+	
+	sudo sysctl -w net.ipv4.ip_forward=1
+
+client2 : 
+
+	sudo ip route add 10.1.2.0/30 via 10.1.1.2 dev enp0s9
+
+Ensuite on vérifie le bon fonctionnement du routage à l'aide d'un `ping` puis d'un `traceroute` (client2) : 
+
+	$ ping 10.1.2.1
+	PING 10.1.2.1 (10.1.2.1) 56(84) bytes of data.
+	64 bytes from 10.1.2.1: icmp_seq=1 ttl=127 time=0.516 ms
+	64 bytes from 10.1.2.1: icmp_seq=2 ttl=127 time=0.657 ms
+	64 bytes from 10.1.2.1: icmp_seq=3 ttl=127 time=0.683 ms
+	^C
+	--- 10.1.2.1 ping statistics ---
+	3 packets transmitted, 3 received, 0% packet loss, time 2076ms
+	rtt min/avg/max/mdev = 0.516/0.625/0.683/0.082 ms
+
+	$ traceroute 10.1.2.1
+	traceroute to 10.1.2.1 (10.1.2.1), 30 hops max, 60 byte packets
+	1  gateway (10.0.2.2)  0.217 ms  0.195 ms  0.124 ms
+	2  10.1.2.1 (10.1.2.1)  0.321 ms  0.253 ms  0.364 ms
